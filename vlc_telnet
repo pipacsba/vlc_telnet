@@ -1,0 +1,72 @@
+#!/bin/bash
+
+a_cmd=$1
+vlc_telnet="xx.xx.xx.xx"
+vlc_pw="xxxxx"
+vlc_telnet_port="4212"
+vlc_www_port="9892"
+ha_address="https://xx.xx.xx.xxx"
+ha_port="8123"
+ha_long_lived_access_token="xxxxxxxxx"
+
+if [[ "$a_cmd" == *m3u* ]]; then
+    if [[ "$a_cmd" == *].m3u* ]]; then
+        a_webradio=$(echo "$a_cmd" | sed 's/.*\[\([^]]*\)\].*/\1/g')
+        { echo $vlc_pw; echo clear; echo add $a_webradio; echo logout; } | nc $vlc_telnet $vlc_telnet_port >>/dev/null
+    else
+        { echo $vlc_pw; echo clear; echo add /share/vlc_/00_m3u/$a_cmd; echo logout; } | nc $vlc_telnet $vlc_telnet_port >>/dev/null
+        sleep 1
+        m3us=$({ echo $vlc_pw; echo playlist; sleep 1; echo logout; } | nc $vlc_telnet $vlc_telnet_port | grep m3u)
+        { 
+            echo $vlc_pw;
+            while IFS= read -r line; do 
+                a_num=$(echo $line | sed -r 's/^([^.]+).*$/\1/; s/^[^0-9]*([0-9]+).*$/\1/')
+                echo goto ${a_num};
+                sleep 0.3
+            done <<< "$m3us"
+            echo logout; 
+        } | nc $vlc_telnet $vlc_telnet_port >>/dev/null
+    fi
+elif [[ "$a_cmd" == "status" ]]; then
+    a_status="OK"
+    a_file="n/a"
+    a_volume="n/a"
+    a_state="n/a"
+    a_loop="n/a"
+    a_random="n/a"
+    a_repeat="n/a"
+    a_status=$(curl -s -u :$vlc_pw $vlc_telnet:$vlc_www_port/requests/status.xml)
+    a_file=$(echo -e "$a_status" | grep "info name='title'" | sed -ne "s:.*<info name='title'>\(.*\)</info>.*:\1:p" | sed 's/<.*//' )
+    a_volume=$(echo -e "$a_status" | grep 'volume' | sed -ne "/volume/{s/.*volume>\(.*\)<\/volume>.*/\1/p;q;}" )
+    a_state=$(echo -e "$a_status" | grep 'state' | sed -ne "/state/{s/.*state>\(.*\)<\/state>.*/\1/p;q;}" )
+    a_loop=$(echo -e "$a_status" | grep 'loop' | sed -ne "/loop/{s/.*loop>\(.*\)<\/loop>.*/\1/p;q;}" )
+    a_random=$(echo -e "$a_status" | grep 'random' | sed -ne "/random/{s/.*random>\(.*\)<\/random>.*/\1/p;q;}" )
+    a_repeat=$(echo -e "$a_status" | grep 'repeat' | sed -ne "/repeat/{s/.*repeat>\(.*\)<\/repeat>.*/\1/p;q;}" )
+    cat << EOF
+    {"status": "$a_state", "volume": "$a_volume", "file": "$a_file", "loop": "$a_loop", "random": "$a_random", "repeat": "$a_repeat"}
+EOF
+elif [[ "$a_cmd" == "stop" ]]; then
+    { echo $vlc_pw; echo stop; echo clear; echo logout; } | nc $vlc_telnet $vlc_telnet_port >>/dev/null
+elif [[ "$a_cmd" == "playlist" ]]; then
+    playlist=$({ echo $vlc_pw; echo playlist; sleep 1; echo logout; } | nc $vlc_telnet $vlc_telnet_port | grep "|" )
+    play_list=""
+    while IFS= read -r line; do 
+        if [ "$line" != "" ];then
+            a_num=$(echo $line | sed -r 's/^([^.]+).*$/\1/; s/^[^0-9]*([0-9]+).*$/\1/')
+            a_name=$(echo $line | cut -d "-" -f2 | tr -d '\r' )
+            a_file="${a_num} ${a_name}"
+            play_list="${play_list} \"${a_file}\","
+        fi
+    done <<< "$playlist"
+    play_list=$(echo $play_list | sed 's/.$//')
+    play_list="{\"entity_id\": \"input_select.vlc_current_playlist\", \"options\": [ $play_list ]}"
+    # echo $play_list
+    curl -s --insecure \
+      -H "authorization: Bearer $ha_long_lived_access_token" \
+      -H "Content-Type: application/json" \
+      -d  "$play_list" \
+      $ha_address:$ha_port/api/services/input_select/set_options
+    
+else
+    { echo $vlc_pw; echo $a_cmd; echo logout; } | nc $vlc_telnet $vlc_telnet_port >>/dev/null
+fi
